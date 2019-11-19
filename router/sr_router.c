@@ -22,6 +22,9 @@
 #include "sr_arpcache.h"
 #include "sr_utils.h"
 
+#include <stdlib.h>
+
+
 /*---------------------------------------------------------------------
  * Method: sr_init(void)
  * Scope:  Global
@@ -66,17 +69,49 @@ void sr_init(struct sr_instance* sr)
  *
  *---------------------------------------------------------------------*/
 
+uint8_t * read_macaddr(uint8_t * ptr) {
+  uint8_t * buff = (uint8_t*) malloc( sizeof(uint8_t) * 7);
+  buff[6] = '\0';
+  return buff;
+}
+
+void print_macaddr(uint8_t * ptr) {
+  uint8_t * mac = read_macaddr(ptr);
+  printf("MAC ADDR: %d:%d:%d:%d:%d:%d\n", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+}
+
 void sr_handlepacket(struct sr_instance* sr,
         uint8_t * packet/* lent */,
         unsigned int len,
         char* interface/* lent */)
 {
+  /*
+
+  struct sr_instance
+  {
+    int  sockfd;                 socket to server 
+    char user[32];               user name 
+    char host[32];               host name  
+    char template[30];           template name if any 
+    unsigned short topo_id;
+    struct sockaddr_in sr_addr;  address to server 
+    struct sr_if if_list;        list of interfaces 
+    struct sr_rt routing_table;  routing table 
+    struct sr_arpcache cache;    ARP cache 
+    pthread_attr_t attr;
+    FILE* logfile;
+  };
+	*/
+
+
   /* REQUIRES */
   assert(sr);
   assert(packet);
   assert(interface);
 
-  printf("*** -> Received packet of length %d \n",len);
+  printf("*** -> Received packet of length %d ",len);
+  printf("on iface %s \n", interface);
+  print_macaddr(packet);
 
   /* fill in code here */
 

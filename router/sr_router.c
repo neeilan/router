@@ -23,6 +23,7 @@
 #include "sr_utils.h"
 
 #include <stdlib.h>
+#include <arpa/inet.h>
 
 
 /*---------------------------------------------------------------------
@@ -68,7 +69,6 @@ void sr_init(struct sr_instance* sr)
  * the method call.
  *
  *---------------------------------------------------------------------*/
-
 uint8_t * read_macaddr(uint8_t * ptr) {
   uint8_t * buff = (uint8_t*) malloc( sizeof(uint8_t) * 7);
   buff[6] = '\0';
@@ -77,8 +77,41 @@ uint8_t * read_macaddr(uint8_t * ptr) {
 
 void print_macaddr(uint8_t * ptr) {
   uint8_t * mac = read_macaddr(ptr);
-  printf("MAC ADDR: %d:%d:%d:%d:%d:%d\n", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  printf("%d:%d:%d:%d:%d:%d", mac[0], mac[1], mac[2], mac[3], mac[4], mac[5]);
+  free(mac);
 }
+
+void handle_ip(uint8_t * packet) {
+  printf("HANDLING IP\n");
+
+  /* Parse the ethernet header */
+  sr_ethernet_hdr_t * eth_header = (sr_ethernet_hdr_t *) packet;
+  printf("DEST MAC: ");      print_macaddr( eth_header->ether_dhost );
+  printf("\nSRC MAC: "); print_macaddr( eth_header->ether_shost );
+  
+}
+
+void handle_arp(uint8_t * packet) {
+  int ETHERNET_HEADER_SIZE = 6 + 6 + 2;
+  printf("HANDLING ARP\n");
+  /* Parse the ethernet header */
+  sr_ethernet_hdr_t * eth_header = (sr_ethernet_hdr_t *) packet;
+
+  printf("DEST MAC: ");      print_macaddr( eth_header->ether_dhost );
+  printf("\nSRC MAC: "); print_macaddr( eth_header->ether_shost );
+  printf("\n");
+
+  sr_arp_hdr_t * arp_header = (sr_arp_hdr_t *)(packet + ETHERNET_HEADER_SIZE);  
+  uint16_t ar_op = ntohs(arp_header->ar_op);
+  if (ar_op == arp_op_request) {
+    printf("ARP REQUEST\n");
+  } else if (ar_op == arp_op_reply) {
+    printf("ARP REPLY\n");
+  } else {
+    /* ERROR - ignore */
+  }
+}
+
 
 void sr_handlepacket(struct sr_instance* sr,
         uint8_t * packet/* lent */,
@@ -111,9 +144,36 @@ void sr_handlepacket(struct sr_instance* sr,
 
   printf("*** -> Received packet of length %d ",len);
   printf("on iface %s \n", interface);
-  print_macaddr(packet);
+  
 
-  /* fill in code here */
+  /*
+
+  uint16_t cksum(const void *_data, int len);
+
+  uint16_t ethertype(uint8_t *buf);
+  uint8_t ip_protocol(uint8_t *buf);
+
+  void print_addr_eth(uint8_t *addr);
+  void print_addr_ip(struct in_addr address);
+  void print_addr_ip_int(uint32_t ip);
+
+  void print_hdr_eth(uint8_t *buf);
+
+  */
+
+  switch (ethertype(packet)) {
+    case ethertype_arp: {
+      handle_arp(packet);
+      return;
+    }
+    case ethertype_ip: {
+      handle_ip(packet);
+      return;
+    }
+    default: {
+      /* DROP */
+    }
+  }
 
 }/* end sr_ForwardPacket */
 

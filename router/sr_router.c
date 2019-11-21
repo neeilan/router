@@ -24,7 +24,10 @@
 
 #include <stdlib.h>
 #include <arpa/inet.h>
+#include <string.h>
 
+int MAC_ADDR_SIZE = 6;
+int ETHERNET_HEADER_SIZE = 6 + 6 + 2;
 
 /*---------------------------------------------------------------------
  * Method: sr_init(void)
@@ -81,19 +84,89 @@ void print_macaddr(uint8_t * ptr) {
   free(mac);
 }
 
+void print_ip(uint32_t ip) {
+  printf("%hhu.%hhu.%hhu.%hhu",
+    *((uint8_t*)(&ip)),
+    *(((uint8_t*)&ip) + 1 ), 
+    *(((uint8_t*)&ip) + 2 ), 
+    *(((uint8_t*)&ip) + 3 ));
+}
+
+void handle_arp_request(
+  struct sr_instance * sr,
+  struct sr_if * iface,
+  sr_arp_hdr_t * hdr) {
+
+  
+  printf("\nARP REQ sender sha is "); print_macaddr( hdr->ar_sha );
+  printf("and tha is "); print_macaddr( hdr->ar_tha );
+  printf("\n");
+
+  uint32_t target_ip = hdr->ar_tip;
+  uint32_t sender_ip = hdr->ar_sip;
+
+  printf("ARP REQ sender ip is "); print_ip(sender_ip); printf("\n");
+
+  struct sr_arpentry * entry = sr_arpcache_lookup( &sr->cache, target_ip );
+
+  if (entry == NULL) {
+    /* No ARP entry */
+    printf("No ARP entry for IP: ");
+    print_ip(target_ip);
+    printf("\n");
+    return;
+  }
+
+  /* Many of the fields are the same as the ARP request, so just memcpy
+     and modify the following fields, which differ:
+     - opcode (request -> reply)
+     - sender MAC and IP
+     - target protocol and IP
+  */
+  sr_arp_hdr_t reply;
+  memcpy(&reply, hdr, sizeof(reply));
+
+  reply.ar_op = htons(arp_op_reply); 
+  /* Everything else was memcpy'd from network, so no need for hton* */
+  reply.ar_sip = iface->ip;
+  reply.ar_tip = hdr->ar_sip; /* Back to source */
+  memcpy(&reply.ar_sha, iface->addr, MAC_ADDR_SIZE);
+  memcpy(&reply.ar_tha, hdr->ar_sha, MAC_ADDR_SIZE);
+  
+  
+
+}
+
+void handle_arp_reply(sr_arp_hdr_t * hdr) {
+ /*
+  req - arpcache_insert(ip, mac)
+  if req:
+    
+    arpreq_destroit(req)
+  */ 
+  
+}
+
 void handle_ip(uint8_t * packet) {
   printf("HANDLING IP\n");
 
   /* Parse the ethernet header */
   sr_ethernet_hdr_t * eth_header = (sr_ethernet_hdr_t *) packet;
-  printf("DEST MAC: ");      print_macaddr( eth_header->ether_dhost );
+  printf("DEST MAC: ");  print_macaddr( eth_header->ether_dhost );
   printf("\nSRC MAC: "); print_macaddr( eth_header->ether_shost );
   
+  sr_ip_hdr_t * ip_hdr = (sr_ip_hdr_t *) packet + ETHERNET_HEADER_SIZE;
+  printf("Received IP req from addr: "); print_ip(ip_hdr->ip_src);
+  printf(" to addr: "); print_ip(ip_hdr->ip_dst);
+  printf("\n");
 }
 
-void handle_arp(uint8_t * packet) {
-  int ETHERNET_HEADER_SIZE = 6 + 6 + 2;
+void handle_arp(
+  struct sr_instance * sr,
+  struct sr_if * iface,
+  uint8_t * packet) {
   printf("HANDLING ARP\n");
+  print_macaddr((uint8_t*)iface->addr);
   /* Parse the ethernet header */
   sr_ethernet_hdr_t * eth_header = (sr_ethernet_hdr_t *) packet;
 
@@ -102,11 +175,58 @@ void handle_arp(uint8_t * packet) {
   printf("\n");
 
   sr_arp_hdr_t * arp_header = (sr_arp_hdr_t *)(packet + ETHERNET_HEADER_SIZE);  
+
+  uint32_t arp_tip = arp_header->ar_tip;
+  struct sr_if *  curr_iface = sr->if_list;
+  /* First check if this is for any of my interface */
+  while (curr_iface && curr_iface->ip != arp_tip) {
+    curr_iface = curr_iface->next;
+  }
+  if (curr_iface) {
+    /* If so, send the receiving interface MAC back, because that's where
+       the sender should send future requests to target IP to. */
+    printf("ARP req is for one of my interfaces!\n");
+    sr_arp_hdr_t reply;
+    memcpy(&reply, arp_header, sizeof(reply));
+    reply.ar_op = htons(arp_op_reply); 
+    /* Everything else was memcpy'd from network, so no need for hton* */
+    reply.ar_sip = iface->ip;
+    reply.ar_tip = arp_header->ar_sip; /* Back to source */
+    memcpy(&reply.ar_sha, iface->addr, MAC_ADDR_SIZE);
+    memcpy(&reply.ar_tha, arp_header->ar_sha, MAC_ADDR_SIZE);
+
+    int packet_len = sizeof(sr_ethernet_hdr_t) + sizeof(sr_arp_hdr_t);
+    uint8_t * reply_buff = (uint8_t*) malloc(packet_len);
+    sr_ethernet_hdr_t * reply_eth_hdr = (sr_ethernet_hdr_t*) reply_buff;
+    memcpy(&reply_eth_hdr->ether_dhost, eth_header->ether_shost, MAC_ADDR_SIZE);
+    memcpy(&reply_eth_hdr->ether_shost, iface->addr, MAC_ADDR_SIZE);
+    print_macaddr((uint8_t*)&reply_eth_hdr->ether_shost);
+    reply_eth_hdr->ether_type = htons(ethertype_arp);
+    
+
+
+    memcpy(reply_buff + sizeof(sr_ethernet_hdr_t), &reply, sizeof(sr_arp_hdr_t));
+    int res = sr_send_packet(sr, reply_buff, packet_len, iface->name); 
+  
+    free(reply_buff);
+    
+
+
+    return;
+    
+  } else {
+    printf("ARP req not for me or anyone I know; dropping.\n");
+    return;
+  }
+
+
   uint16_t ar_op = ntohs(arp_header->ar_op);
   if (ar_op == arp_op_request) {
     printf("ARP REQUEST\n");
+    handle_arp_request(sr, iface, arp_header);
   } else if (ar_op == arp_op_reply) {
     printf("ARP REPLY\n");
+    handle_arp_reply(arp_header);
   } else {
     /* ERROR - ignore */
   }
@@ -142,8 +262,10 @@ void sr_handlepacket(struct sr_instance* sr,
   assert(packet);
   assert(interface);
 
-  printf("*** -> Received packet of length %d ",len);
-  printf("on iface %s \n", interface);
+  struct sr_if * iface = (struct sr_if *) interface;
+
+  printf("\n\n*** -> Received packet of length %d ",len);
+  printf("on iface %s (", interface); print_macaddr((uint8_t*)iface->addr); printf(")\n");
   
 
   /*
@@ -163,7 +285,7 @@ void sr_handlepacket(struct sr_instance* sr,
 
   switch (ethertype(packet)) {
     case ethertype_arp: {
-      handle_arp(packet);
+      handle_arp(sr, iface, packet);
       return;
     }
     case ethertype_ip: {

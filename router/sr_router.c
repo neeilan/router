@@ -134,6 +134,34 @@ void handle_arp_reply(sr_arp_hdr_t * hdr) {
   
 }
 
+struct sr_rt * match_longest_prefix(struct sr_instance * sr, const uint32_t ip_addr) {
+  struct sr_rt * longest_match = NULL;
+  int longest_prefix = 0;
+
+  struct sr_rt * rt = sr->routing_table;
+  while (rt) {
+    int curr_prefix = 0;
+    uint32_t prefix = 1 << 31;
+    uint32_t mask = 0;    
+
+    while ( (ip_addr & mask) == (ntohl(rt->dest.s_addr) & mask) ) {
+      if (curr_prefix > longest_prefix) {
+        longest_prefix = curr_prefix;
+        longest_match = rt;
+      }
+
+      mask = mask | prefix;
+      prefix = ( prefix >> 1 ) | ( 1 << 31 );
+      curr_prefix++;
+
+    }
+    
+    rt = rt->next;
+  }
+
+  return longest_match; 
+}
+
 
 void handle_ip(struct sr_instance * sr, uint8_t * eth_packet) {
   printf("HANDLING IP\n");
@@ -180,7 +208,10 @@ void handle_ip(struct sr_instance * sr, uint8_t * eth_packet) {
   if (iface) {
     printf("THIS IS FOR MEEEEEEE!!!\n");
     /* TODO: Finish this. */  
+    return;
   }
+
+  printf("THIS IS NOOOOOOOT FOR MEEEEEEE!!!\n");
 
   uint8_t next_ttl;
   if ((next_ttl = ip_hdr->ip_ttl - 1) == 0) {
@@ -200,6 +231,12 @@ void handle_ip(struct sr_instance * sr, uint8_t * eth_packet) {
   res_ip_hdr->ip_sum = cksum((const void *) res_ip_hdr, ip_hl * 4);
 
   /* Find the appropriate router (if any) to forward to. */
+  struct sr_rt * match = match_longest_prefix(sr, ip_hdr->ip_dst); 
+  if (match) {
+    printf("MATCH FOUND!!!!\n");
+  } else {
+    printf("NOOOOOO MATCH FOUND!!!!\n");
+  }
 
 
 

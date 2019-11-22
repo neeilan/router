@@ -134,12 +134,66 @@ void handle_arp_reply(sr_arp_hdr_t * hdr) {
   
 }
 
+
+/* Based on implementation in pg 95 on Peterson and Davie textbook (5e). */
+uint16_t ip_checksum(uint8_t * payload, const int ip_len) {
+  if (ip_len == 0) return 0;
+
+  /* First, we need to align the payload to multiple of 16 */
+  int count = (ip_len + 1) / 2; /* Number of 16-bit blocks in buff */
+  uint8_t * bbuf = (uint8_t*) calloc( count , sizeof(uint16_t));
+  if (ip_len % 2 == 0) {
+    memcpy(bbuf, payload, ip_len);
+  } else {
+    memcpy(bbuf + 1, payload, ip_len);
+  }
+
+  uint16_t * sbuf = (uint16_t*) bbuf;
+
+ 
+  long sum = 0;
+  while (count--) {
+  sum += *sbuf++;
+  if (sum & 0xFFFF0000) {
+      /* carry occurred, so wrap around */
+      sum &= 0xFFFF;
+      sum++;
+    }
+  }
+
+  free(bbuf);
+  return ~(sum & 0xFFFF);
+}
+
+
+
 void handle_ip(uint8_t * eth_packet) {
   printf("HANDLING IP\n");
 
   /* Parse the ethernet header */
   sr_ethernet_hdr_t * eth_header = (sr_ethernet_hdr_t *) eth_packet;  
   sr_ip_hdr_t * ip_hdr = (sr_ip_hdr_t *) (eth_packet + sizeof(sr_ethernet_hdr_t));
+
+
+  /* const uint16_t ip_hdr->ip_len; */
+   
+
+  /* Verify the checksum */
+ /* if (ntohs(ip_hdr->ip_sum) !=  */
+    
+
+  sr_ip_hdr_t * buf = (sr_ip_hdr_t *) malloc(ip_hdr->ip_len);
+  memcpy(buf, ip_hdr, ip_hdr->ip_len);
+  buf->ip_sum = 0;
+
+  uint16_t our_cksum = ip_checksum(
+    /* eth_packet + sizeof(sr_ethernet_hdr_t) + sizeof(sr_ip_hdr_t), */
+    (uint8_t*) buf,
+    ip_hdr->ip_len);
+
+  uint16_t cksum_cs = cksum((const void * )buf, ip_hdr->ip_len);
+
+  fprintf(stderr, "Real checksum: %d, Our checksum: %d, CKsum: %d\n", ntohs(ip_hdr->ip_sum), our_cksum, cksum_cs);
 
   fprintf(stderr, "Received IP req from addr: ");
   print_addr_ip_int(htonl(ip_hdr->ip_src));

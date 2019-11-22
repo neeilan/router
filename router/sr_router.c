@@ -142,32 +142,33 @@ void handle_ip(uint8_t * eth_packet) {
   sr_ethernet_hdr_t * eth_header = (sr_ethernet_hdr_t *) eth_packet;  
   sr_ip_hdr_t * ip_hdr = (sr_ip_hdr_t *) (eth_packet + sizeof(sr_ethernet_hdr_t));
 
-
-  /* const uint16_t ip_hdr->ip_len; */
-   
-
-  /* According to Wikipedia, "IHL field contains the size of the IPv4 header,
-  it has 4 bits that specify the number of 32-bit words in the header." */
-  unsigned int ip_hl = ip_hdr->ip_hl;
-  printf("iphl: %d\n", ip_hl);
-
-  /* Verify the checksum */
- /* if (ntohs(ip_hdr->ip_sum) !=  */
-    
-
-  sr_ip_hdr_t * buf = (sr_ip_hdr_t *) malloc(sizeof(uint32_t) * ip_hl);
-  memcpy(buf, ip_hdr, sizeof(uint32_t) * ip_hl);
-  buf->ip_sum = 0;
-
-  uint16_t cksum_cs = cksum((const void * )buf, 4 * ip_hl);
-
-  fprintf(stderr, "Real checksum: %d, CKsum: %d\n", (ip_hdr->ip_sum), cksum_cs);
-
+  /******/
   fprintf(stderr, "Received IP req from addr: ");
   print_addr_ip_int(htonl(ip_hdr->ip_src));
   fprintf(stderr, " to addr: ");
   print_addr_ip_int(htonl(ip_hdr->ip_dst));
   fprintf(stderr, "\n");
+  /******/
+
+  /* According to Wikipedia, "IHL field contains the size of the IPv4 header,
+  it has 4 bits that specify the number of 32-bit words in the header."; so 
+  we multiply this value by 4 to get total size in bytes */
+  unsigned int ip_hl = ip_hdr->ip_hl;
+
+  /* Verify the checksum */
+  sr_ip_hdr_t * buf = (sr_ip_hdr_t *) malloc(sizeof(uint32_t) * ip_hl);
+  memcpy(buf, ip_hdr, sizeof(uint32_t) * ip_hl);
+  /* Clear checksum in frame before calculating checksum. So no recursion :) */
+  buf->ip_sum = 0;
+
+  uint16_t calculated_cksum = cksum((const void * )buf, 4 * ip_hl);
+  free(buf);
+
+  if (calculated_cksum != ip_hdr->ip_sum) {
+    fprintf(stderr, "IP checksum incorrect - dropping packet.\n");
+    return; 
+  }
+
 }
 
 void handle_arp(

@@ -135,7 +135,7 @@ void handle_arp_reply(sr_arp_hdr_t * hdr) {
 }
 
 
-void handle_ip(uint8_t * eth_packet) {
+void handle_ip(struct sr_instance * sr, uint8_t * eth_packet) {
   printf("HANDLING IP\n");
 
   /* Parse the ethernet header */
@@ -168,6 +168,45 @@ void handle_ip(uint8_t * eth_packet) {
     fprintf(stderr, "IP checksum incorrect - dropping packet.\n");
     return; 
   }
+
+  const uint32_t dst_ip = htonl(ip_hdr->ip_dst);
+
+  /* Check whether this packet is for one of my interfaces. */
+  struct sr_if * iface = sr->if_list;
+  while (iface && htonl(iface->ip) != dst_ip) {
+    iface = iface->next;
+  }
+
+  if (iface) {
+    printf("THIS IS FOR MEEEEEEE!!!\n");
+    /* TODO: Finish this. */  
+  }
+
+  uint8_t next_ttl;
+  if ((next_ttl = ip_hdr->ip_ttl - 1) == 0) {
+    printf("Ran out of TTL - send ICMP.\n");
+    return;
+  }
+
+  
+  sr_ip_hdr_t * res_ip_hdr = (sr_ip_hdr_t *) malloc(sizeof(sr_ip_hdr_t));
+  memcpy(res_ip_hdr, ip_hdr, sizeof(sr_ip_hdr_t));
+
+  /* Set fields in the response IP datagram. */
+  res_ip_hdr->ip_ttl = next_ttl;
+  
+  /* Calculate the checksum */
+  res_ip_hdr->ip_sum = 0;
+  res_ip_hdr->ip_sum = cksum((const void *) res_ip_hdr, ip_hl * 4);
+
+  /* Find the appropriate router (if any) to forward to. */
+
+
+
+  
+  
+
+  
 
 }
 
@@ -292,7 +331,7 @@ void sr_handlepacket(struct sr_instance* sr,
     }
     case ethertype_ip: {
       if (len < sizeof(sr_ethernet_hdr_t) + sizeof(sr_ip_hdr_t)) return;
-      handle_ip(packet);
+      handle_ip(sr, packet);
       return;
     }
     default: {

@@ -74,6 +74,7 @@ void sr_init(struct sr_instance* sr)
  *---------------------------------------------------------------------*/
 uint8_t * read_macaddr(uint8_t * ptr) {
   uint8_t * buff = (uint8_t*) malloc( sizeof(uint8_t) * 7);
+  memcpy(buff, ptr, MAC_ADDR_SIZE);
   buff[6] = '\0';
   return buff;
 }
@@ -99,7 +100,7 @@ void handle_arp_request(
 
   
   printf("\nARP REQ sender sha is "); print_macaddr( hdr->ar_sha );
-  printf("and tha is "); print_macaddr( hdr->ar_tha );
+  printf(" and tha is "); print_macaddr( hdr->ar_tha );
   printf("\n");
 
   uint32_t target_ip = hdr->ar_tip;
@@ -154,6 +155,7 @@ void handle_ip(uint8_t * packet) {
   sr_ethernet_hdr_t * eth_header = (sr_ethernet_hdr_t *) packet;
   printf("DEST MAC: ");  print_macaddr( eth_header->ether_dhost );
   printf("\nSRC MAC: "); print_macaddr( eth_header->ether_shost );
+  printf("\n");
   
   sr_ip_hdr_t * ip_hdr = (sr_ip_hdr_t *) packet + ETHERNET_HEADER_SIZE;
   printf("Received IP req from addr: "); print_ip(ip_hdr->ip_src);
@@ -166,12 +168,11 @@ void handle_arp(
   struct sr_if * iface,
   uint8_t * packet) {
   printf("HANDLING ARP\n");
-  print_macaddr((uint8_t*)iface->addr);
   /* Parse the ethernet header */
   sr_ethernet_hdr_t * eth_header = (sr_ethernet_hdr_t *) packet;
 
-  printf("DEST MAC: ");      print_macaddr( eth_header->ether_dhost );
-  printf("\nSRC MAC: "); print_macaddr( eth_header->ether_shost );
+  printf("DEST MAC: ");      print_macaddr( (uint8_t*) eth_header->ether_dhost );
+  printf("\nSRC MAC: "); print_macaddr(  (uint8_t*) eth_header->ether_shost );
   printf("\n");
 
   sr_arp_hdr_t * arp_header = (sr_arp_hdr_t *)(packet + ETHERNET_HEADER_SIZE);  
@@ -179,6 +180,7 @@ void handle_arp(
   uint32_t arp_tip = arp_header->ar_tip;
   struct sr_if *  curr_iface = sr->if_list;
   /* First check if this is for any of my interface */
+  /* TODO(neeilan): Put own entries in cache so we can remove this code path */
   while (curr_iface && curr_iface->ip != arp_tip) {
     curr_iface = curr_iface->next;
   }
@@ -186,32 +188,34 @@ void handle_arp(
     /* If so, send the receiving interface MAC back, because that's where
        the sender should send future requests to target IP to. */
     printf("ARP req is for one of my interfaces!\n");
+
     sr_arp_hdr_t reply;
     memcpy(&reply, arp_header, sizeof(reply));
     reply.ar_op = htons(arp_op_reply); 
-    /* Everything else was memcpy'd from network, so no need for hton* */
     reply.ar_sip = iface->ip;
     reply.ar_tip = arp_header->ar_sip; /* Back to source */
-    memcpy(&reply.ar_sha, iface->addr, MAC_ADDR_SIZE);
-    memcpy(&reply.ar_tha, arp_header->ar_sha, MAC_ADDR_SIZE);
+    memcpy(&reply.ar_sha, iface->addr, ETHER_ADDR_LEN);
+    memcpy(&reply.ar_tha, arp_header->ar_sha, ETHER_ADDR_LEN);
 
-    int packet_len = sizeof(sr_ethernet_hdr_t) + sizeof(sr_arp_hdr_t);
+    /*  ========================
+     * | ETHERNET HDR | ARP HDR | 
+     *  ========================
+     */
+    const int packet_len = sizeof(sr_ethernet_hdr_t) + sizeof(sr_arp_hdr_t);
     uint8_t * reply_buff = (uint8_t*) malloc(packet_len);
-    sr_ethernet_hdr_t * reply_eth_hdr = (sr_ethernet_hdr_t*) reply_buff;
-    memcpy(&reply_eth_hdr->ether_dhost, eth_header->ether_shost, MAC_ADDR_SIZE);
-    memcpy(&reply_eth_hdr->ether_shost, iface->addr, MAC_ADDR_SIZE);
-    print_macaddr((uint8_t*)&reply_eth_hdr->ether_shost);
-    reply_eth_hdr->ether_type = htons(ethertype_arp);
+
+
+    sr_ethernet_hdr_t reply_eth_hdr;
+    memcpy(&reply_eth_hdr.ether_dhost, eth_header->ether_shost, ETHER_ADDR_LEN);
+    memcpy(&reply_eth_hdr.ether_shost, iface->addr, ETHER_ADDR_LEN);
+    reply_eth_hdr.ether_type = htons(ethertype_arp);
     
-
-
+    memcpy(reply_buff, &reply_eth_hdr, sizeof(sr_ethernet_hdr_t));
     memcpy(reply_buff + sizeof(sr_ethernet_hdr_t), &reply, sizeof(sr_arp_hdr_t));
-    int res = sr_send_packet(sr, reply_buff, packet_len, iface->name); 
-  
+
+    sr_send_packet(sr, reply_buff, packet_len, iface->name); 
+
     free(reply_buff);
-    
-
-
     return;
     
   } else {
@@ -238,31 +242,12 @@ void sr_handlepacket(struct sr_instance* sr,
         unsigned int len,
         char* interface/* lent */)
 {
-  /*
-
-  struct sr_instance
-  {
-    int  sockfd;                 socket to server 
-    char user[32];               user name 
-    char host[32];               host name  
-    char template[30];           template name if any 
-    unsigned short topo_id;
-    struct sockaddr_in sr_addr;  address to server 
-    struct sr_if if_list;        list of interfaces 
-    struct sr_rt routing_table;  routing table 
-    struct sr_arpcache cache;    ARP cache 
-    pthread_attr_t attr;
-    FILE* logfile;
-  };
-	*/
-
-
   /* REQUIRES */
   assert(sr);
   assert(packet);
   assert(interface);
 
-  struct sr_if * iface = (struct sr_if *) interface;
+  struct sr_if * iface = sr_get_interface(sr, interface);
 
   printf("\n\n*** -> Received packet of length %d ",len);
   printf("on iface %s (", interface); print_macaddr((uint8_t*)iface->addr); printf(")\n");

@@ -134,17 +134,17 @@ void handle_arp_reply(sr_arp_hdr_t * hdr) {
   
 }
 
-void handle_ip(uint8_t * packet) {
+void handle_ip(uint8_t * eth_packet) {
   printf("HANDLING IP\n");
 
   /* Parse the ethernet header */
-  sr_ethernet_hdr_t * eth_header = (sr_ethernet_hdr_t *) packet;  
-  sr_ip_hdr_t * ip_hdr = (sr_ip_hdr_t *) packet + sizeof(sr_ethernet_hdr_t);
+  sr_ethernet_hdr_t * eth_header = (sr_ethernet_hdr_t *) eth_packet;  
+  sr_ip_hdr_t * ip_hdr = (sr_ip_hdr_t *) (eth_packet + sizeof(sr_ethernet_hdr_t));
 
   fprintf(stderr, "Received IP req from addr: ");
-  print_addr_ip_int(ip_hdr->ip_src);
+  print_addr_ip_int(htonl(ip_hdr->ip_src));
   fprintf(stderr, " to addr: ");
-  print_addr_ip_int(ip_hdr->ip_dst);
+  print_addr_ip_int(htonl(ip_hdr->ip_dst));
   fprintf(stderr, "\n");
 }
 

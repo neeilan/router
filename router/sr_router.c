@@ -119,9 +119,6 @@ void handle_arp_request(
   reply.ar_tip = hdr->ar_sip; /* Back to source */
   memcpy(&reply.ar_sha, iface->addr, MAC_ADDR_SIZE);
   memcpy(&reply.ar_tha, hdr->ar_sha, MAC_ADDR_SIZE);
-  
-  
-
 }
 
 void handle_arp_reply(sr_arp_hdr_t * hdr) {
@@ -160,6 +157,32 @@ struct sr_rt * match_longest_prefix(struct sr_instance * sr, const uint32_t ip_a
   }
 
   return longest_match; 
+}
+
+void send_ip_datagram(
+    struct sr_instance * sr,
+    struct sr_rt * rt,
+    sr_ip_hdr_t * data,
+    size_t data_size) {
+  size_t eth_frame_size = sizeof(sr_ethernet_hdr_t) + data_size;
+  uint8_t * buffer = malloc(eth_frame_size);
+
+  struct sr_if * iface = sr_get_interface(sr, rt->interface);
+  if (!iface) { return; }
+
+  sr_ethernet_hdr_t * eth_hdr_borrowed = (sr_ethernet_hdr_t*) buffer;
+  memcpy(eth_hdr_borrowed->ether_dhost, &rt->dest.s_addr, ETHER_ADDR_LEN);
+  memcpy(eth_hdr_borrowed->ether_shost, iface->addr, ETHER_ADDR_LEN);
+  eth_hdr_borrowed->ether_type = ethertype_ip;
+
+
+  fprintf(stderr, "Eth frame dhost: "); print_addr_eth(eth_hdr_borrowed->ether_dhost);
+  fprintf(stderr, "Eth frame shost: "); print_addr_eth(eth_hdr_borrowed->ether_shost);
+  
+
+  int result = sr_send_packet(sr, buffer, eth_frame_size, rt->interface );
+  fprintf(stderr, "Ethernet send result: %d\n", result);
+  free(buffer);
 }
 
 
@@ -234,17 +257,30 @@ void handle_ip(struct sr_instance * sr, uint8_t * eth_packet) {
   struct sr_rt * match = match_longest_prefix(sr, ip_hdr->ip_dst); 
   if (match) {
     printf("MATCH FOUND!!!!\n");
+    size_t ip_packet_len = ip_hl * sizeof(uint32_t) + ip_hdr->ip_len ;
+    uint8_t * buffer = (uint8_t*) malloc( ip_packet_len ); 
+    /* Copy the header */
+    memcpy(buffer, res_ip_hdr, sizeof(sr_ip_hdr_t));
+
+    /* Copy the data */
+    memcpy((uint8_t *)buffer + sizeof(sr_ip_hdr_t),
+      ((uint8_t*)ip_hdr) + sizeof(sr_ip_hdr_t),
+      ip_hdr->ip_len - (ip_hdr->ip_hl * sizeof(uint32_t)));
+    
+    /* Send it! */
+    sr_ip_hdr_t * hdr_borrowed = (sr_ip_hdr_t*) buffer;
+    
+    fprintf(stderr, "Sending IP frame to ip: "); print_addr_ip_int(hdr_borrowed->ip_dst);
+    fprintf(stderr, " from ip: "); print_addr_ip_int(hdr_borrowed->ip_src);
+
+    send_ip_datagram(sr, match, (sr_ip_hdr_t *) buffer, ip_packet_len); 
+
+    free(buffer);
   } else {
     printf("NOOOOOO MATCH FOUND!!!!\n");
   }
 
-
-
-  
-  
-
-  
-
+  free(res_ip_hdr);
 }
 
 void handle_arp(

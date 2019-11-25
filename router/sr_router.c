@@ -77,18 +77,32 @@ void sr_init(struct sr_instance* sr)
 
 } /* -- sr_init -- */
 
-/*
 
-*/
+/*---------------------------------------------------------------------
+ * Method: send_or_resend_arp_req(struct sr_instance *sr, struct sr_arpreq *req)
+ * Scope:  Private
+ *
+ * When a IP request is enqueued into ARP queue, the returned arp req
+ * is handled by this function by sending ARP requests.
+ *---------------------------------------------------------------------*/
 
 void send_or_resend_arp_req(struct sr_instance *sr, struct sr_arpreq *req) {
+  /* It's been less than a second since the req was last sent. */
   if (difftime(time(0), req->sent) < 1.0) return;
 
   /* From the assignment FAQ: How many ARP requests must I send to a host
     without a response before I send an ICMP host unreacheable packet back
     to the sending host? 5. */
-  if (req->times_sent == 5) {
-    /* TODO(neeilan): Send ICMP */
+  if (req->times_sent > 5) {
+    /* type is 3 (unreachable). Code is 1 (host unreachable).
+       Reference: https://www.iana.org/assignments/icmp-parameters/
+          icmp-parameters.xhtml#icmp-parameters-codes-3
+    */
+    struct sr_packet * packet = req->packets;
+    while (packet) {
+      send_icmp(sr, (sr_ip_hdr_t*) packet->buf, 3, 1, sr_get_interface(sr, packet->iface));
+      free(packet->buf);
+    }
     return; 
   } 
 
@@ -114,6 +128,14 @@ void send_or_resend_arp_req(struct sr_instance *sr, struct sr_arpreq *req) {
 
 
 
+/*---------------------------------------------------------------------
+ * Method: handle_arp_request(struct sr_instance * sr, struct sr_if * iface,
+ * sr_arp_hdr_t * hdr)
+ * Scope:  Private
+ *
+ * This is our ARP request handler. If an entry is found, it sends an ARP
+ * reply to the sender. If not, the request is dropped.
+ *---------------------------------------------------------------------*/
 void handle_arp_request(
   struct sr_instance * sr,
   struct sr_if * iface,
@@ -153,16 +175,12 @@ void handle_arp_request(
     ethertype_arp);
 }
 
-void handle_arp_reply(sr_arp_hdr_t * hdr) {
- /*
-  req - arpcache_insert(ip, mac)
-  if req:
-    
-    arpreq_destroit(req)
-  */ 
-  
-}
-
+/*---------------------------------------------------------------------
+ * Method: match_longest_prefix(struct sr_instance * sr, uint32_t ip_addr)
+ * Scope:  Private
+ *
+ * This method implements longest prefix matching.
+ *---------------------------------------------------------------------*/
 struct sr_rt * match_longest_prefix(struct sr_instance * sr, uint32_t ip_addr) {
   struct sr_rt * longest_match = NULL;
   int longest_prefix = 0;
@@ -176,7 +194,7 @@ struct sr_rt * match_longest_prefix(struct sr_instance * sr, uint32_t ip_addr) {
     uint32_t mask = 0;    
 
 
-    /* Exact match baby! */
+    /* Exact match! */
     if (ip_addr == ntohl(rt->dest.s_addr)) { 
       return rt;
     }
@@ -200,6 +218,14 @@ struct sr_rt * match_longest_prefix(struct sr_instance * sr, uint32_t ip_addr) {
 }
 
 
+/*---------------------------------------------------------------------
+ * Method: send_ip_datagram(struct sr_instance * sr, struct sr_rt * rt,
+ *  sr_ip_hdr_t * data, int data_size)
+ * Scope:  Private
+ *
+ * This is a thin wrapper around send_ethernet_frame, which abstracts away
+ * IP-specific details of the send_ethernet_frame call.
+ *---------------------------------------------------------------------*/
 void send_ip_datagram(
     struct sr_instance * sr,
     struct sr_rt * rt,
@@ -208,10 +234,16 @@ void send_ip_datagram(
   send_ethernet_frame(sr, (uint8_t*) data, data_size, rt->dest.s_addr, rt->interface, ethertype_ip);
 }
 
-/*
-Sends a black-box packet (data) of size data_size bytes as an ethernet
-frame to rt link.
-*/
+/*---------------------------------------------------------------------
+ * Method:  send_ethernet_frame( struct sr_instance * sr, uint8_t * data,
+ * size_t data_size, uint32_t dest_addr, const char * interface,
+ * uint16_t ethertype)
+ *
+ * Scope:  Private
+ *
+ * Sends a black-box packet (data) of size data_size bytes as an ethernet
+ * frame to dest_addr (IP address).
+ *---------------------------------------------------------------------*/
 void send_ethernet_frame(
   struct sr_instance * sr,
   uint8_t * data,
@@ -220,11 +252,11 @@ void send_ethernet_frame(
   const char * interface,
   uint16_t ethertype) {
 
-
-
   struct sr_rt * rt = match_longest_prefix(sr, dest_addr);
   if (!rt && ethertype == ethertype_ip) {
-    /* type is 3 (unreachable). Code is 0 (net unreachable). */
+    /* type is 3 (unreachable). Code is 0 (net unreachable).
+       Reference: https://www.iana.org/assignments/icmp-parameters/icmp-parameters.xhtml#icmp-parameters-codes-3
+    */
     send_icmp(sr, (sr_ip_hdr_t*) data, 3, 0, sr_get_interface(sr, interface));
     return;
   } 
@@ -242,11 +274,12 @@ void send_ethernet_frame(
 
   /* Find the gateway mac */
   struct sr_arpentry * entry = sr_arpcache_lookup(&sr->cache, rt->gw.s_addr);
-  if (!entry && ethertype != ethertype_arp) { /* We don't need des mac for an arp req */
+ /* We don't need des mac for an arp req - we just broadcast it. */
+  if (!entry && ethertype != ethertype_arp) {
     fprintf(stderr, "No ARP cache entry for ");
     print_addr_ip_int(rt->gw.s_addr);
     /* We need to send out an ARP request to find the right MAC to send to,
-       so we put this request in the ARP cache queue. Only thing left to do is
+       so we put this IP request in the ARP cache queue. Only thing left to do is
        setting this packets dhost when it becomes available.
     */
     struct sr_arpreq * arp_req = sr_arpcache_queuereq(&sr->cache, rt->gw.s_addr, data, data_size, rt->interface);
@@ -284,6 +317,15 @@ void send_ethernet_frame(
   free(buffer);
 }
 
+/*---------------------------------------------------------------------
+ * Method:  send_icmp(struct sr_instance * sr, sr_ip_hdr_t * ip_hdr,
+ * uint8_t icmp_type, uint8_t icmp_code, struct sr_if * iface)
+ *
+ * Scope:  Private
+ *
+ * Sends an ICMP packet of given type and code to the target ip address
+ * in ip_hdr.
+ *---------------------------------------------------------------------*/
 void send_icmp(
   struct sr_instance * sr,
   sr_ip_hdr_t * ip_hdr,
@@ -315,12 +357,16 @@ void send_icmp_ttl(struct sr_instance * sr, sr_ip_hdr_t * ip_hdr, struct sr_if *
   send_icmp(sr, ip_hdr, 11, 0, iface);
 }
 
-/* Handles IP requests. */
+/*---------------------------------------------------------------------
+ * Method: handle_ip(struct sr_instance * sr, uint8_t * eth_packet,
+ *   struct sr_if * iface, unsigned int len)
+ *
+ * Scope:  Private
+ *
+ * This is our IP request handler, which performs packet forwarding via
+ * longest prefix matching and ARP queries (if necessary).
+ *---------------------------------------------------------------------*/
 void handle_ip(struct sr_instance * sr, uint8_t * eth_packet, struct sr_if * iface, unsigned int len) {
-  /* Print the headers */
-  print_hdr_eth(eth_packet);
-  print_hdr_ip(eth_packet + sizeof(sr_ethernet_hdr_t));
-  
 
   sr_ip_hdr_t * ip_hdr = (sr_ip_hdr_t *) (eth_packet + sizeof(sr_ethernet_hdr_t));
 
@@ -395,7 +441,7 @@ void handle_ip(struct sr_instance * sr, uint8_t * eth_packet, struct sr_if * ifa
 
     free(buffer);
   } else {
-    /* No match found */
+    /* No match found - ICMP unreachable */
   }
 
   free(res_ip_hdr);
@@ -403,10 +449,14 @@ void handle_ip(struct sr_instance * sr, uint8_t * eth_packet, struct sr_if * ifa
 
 
 /*---------------------------------------------------------------------
-  Handles ARP (requests and replies). In turn, it uses
-  handle_arp_request and handle_arp_reply to do its work.
-  uint8_t * packet is pointer to start of the ethernet packet.
----------------------------------------------------------------------*/
+ * Method: handle_arp(struct sr_instance * sr, struct sr_if * iface,
+ *  uint8_t * packet, unsigned int len)
+ * Scope:  Private
+ *
+ * Handles ARP (requests and replies). In turn, it uses
+ * handle_arp_request and handle_arp_reply to do its work.
+ * uint8_t * packet is pointer to start of the ethernet packet.
+ *---------------------------------------------------------------------*/
 void handle_arp(
   struct sr_instance * sr,
   struct sr_if * iface,
@@ -420,7 +470,6 @@ void handle_arp(
   struct sr_arpreq * waiting  = sr_arpcache_insert(&sr->cache, arp_header->ar_sha, arp_header->ar_sip);
   /* Any packets were waiting for this mapping? */
   if (waiting) {
-    /* TODO(neeilan: Send these packets out */  
     struct sr_packet * packet = waiting->packets;
 
     while (packet) {
@@ -482,8 +531,8 @@ void handle_arp(
   if (ar_op == arp_op_request) {
     handle_arp_request(sr, iface, arp_header);
   } else if (ar_op == arp_op_reply) {
-    printf("ARP REPLY\n");
-    handle_arp_reply(arp_header);
+    /* We already handle replies in this method by sending relevant
+      queued packets when a reply (or request, for that matter) is received. */
   } else {
     /* ERROR - ignore */
   }
@@ -545,5 +594,5 @@ void sr_handlepacket(struct sr_instance* sr,
     }
   }
 
-}/* end sr_ForwardPacket */
+}
 

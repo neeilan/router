@@ -13,6 +13,7 @@
 
 #include <stdio.h>
 #include <assert.h>
+#include <time.h>
 
 
 #include "sr_if.h"
@@ -26,8 +27,27 @@
 #include <arpa/inet.h>
 #include <string.h>
 
+/* DECLARATIONS */
 int MAC_ADDR_SIZE = 6;
 int ETHERNET_HEADER_SIZE = 6 + 6 + 2;
+
+void send_ethernet_frame(
+  struct sr_instance * sr,
+  uint8_t * data,
+  size_t data_size,
+  uint32_t dest_ip,
+  const char * interface,
+  uint16_t ethertype);
+
+void send_icmp(
+  struct sr_instance * sr,
+  sr_ip_hdr_t * ip_hdr,
+  uint8_t icmp_type,
+  uint8_t icmp_code,
+  struct sr_if * iface);
+
+
+/* IMPLEMENTATIONS */
 
 /*---------------------------------------------------------------------
  * Method: sr_init(void)
@@ -60,6 +80,40 @@ void sr_init(struct sr_instance* sr)
 /*
 
 */
+
+void send_or_resend_arp_req(struct sr_instance *sr, struct sr_arpreq *req) {
+  if (difftime(time(0), req->sent) < 1.0) return;
+
+  /* From the assignment FAQ: How many ARP requests must I send to a host
+    without a response before I send an ICMP host unreacheable packet back
+    to the sending host? 5. */
+  if (req->times_sent == 5) {
+    /* TODO(neeilan): Send ICMP */
+    return; 
+  } 
+
+  req->times_sent++;
+  req->sent = time(0);
+
+  struct sr_if * iface = sr_get_interface(sr, req->packets->iface);
+
+  sr_arp_hdr_t arp;
+  /* req tip is already set in cache req entry at creation time. */
+  arp.ar_tip = req->ip;
+  arp.ar_hrd = htons(arp_hrd_ethernet);
+  arp.ar_pro = htons(0x0800); /* according to wikipedia, 0x0800 is the protocol value for IP in ARP*/
+  arp.ar_op = htons(arp_op_request);
+  arp.ar_pln = 4;
+  arp.ar_hln = MAC_ADDR_SIZE;
+  arp.ar_sip = iface->ip;
+  
+  memcpy(&arp.ar_sha, iface->addr, MAC_ADDR_SIZE);
+
+  send_ethernet_frame(sr, (uint8_t *) &arp, sizeof(*req), req->ip, iface->name, ethertype_arp);
+}
+
+
+
 void handle_arp_request(
   struct sr_instance * sr,
   struct sr_if * iface,
@@ -150,8 +204,8 @@ void send_ip_datagram(
     struct sr_instance * sr,
     struct sr_rt * rt,
     sr_ip_hdr_t * data,
-    size_t data_size) {
-  send_ethernet_frame(sr, data, data_size, rt->dest.s_addr, rt->interface, ethertype_ip);
+    int data_size) {
+  send_ethernet_frame(sr, (uint8_t*) data, data_size, rt->dest.s_addr, rt->interface, ethertype_ip);
 }
 
 /*
@@ -162,23 +216,71 @@ void send_ethernet_frame(
   struct sr_instance * sr,
   uint8_t * data,
   size_t data_size,
-  uiint8_t * dest_addr.
+  uint32_t dest_addr,
   const char * interface,
-  uint8_t ethertype) {
+  uint16_t ethertype) {
+
+
+
+  struct sr_rt * rt = match_longest_prefix(sr, dest_addr);
+  if (!rt && ethertype == ethertype_ip) {
+    /* type is 3 (unreachable). Code is 0 (net unreachable). */
+    send_icmp(sr, (sr_ip_hdr_t*) data, 3, 0, sr_get_interface(sr, interface));
+    return;
+  } 
+  struct sr_if * iface = sr_get_interface(sr, rt->interface);
+  if (!iface) { return; }
+
 
   size_t eth_frame_size = sizeof(sr_ethernet_hdr_t) + data_size;
   uint8_t * buffer = malloc(eth_frame_size);
 
-  struct sr_if * iface = sr_get_interface(sr, interface);
-  if (!iface) { return; }
-
   sr_ethernet_hdr_t * eth_hdr_borrowed = (sr_ethernet_hdr_t*) buffer;
-  memcpy(eth_hdr_borrowed->ether_dhost, dest_addr, ETHER_ADDR_LEN);
-  memcpy(eth_hdr_borrowed->ether_shost, iface->addr, ETHER_ADDR_LEN);
   eth_hdr_borrowed->ether_type = htons(ethertype);
-
+  memcpy(eth_hdr_borrowed->ether_shost, iface->addr, ETHER_ADDR_LEN);
   memcpy(eth_hdr_borrowed + 1, data, data_size);
-  sr_send_packet(sr, buffer, eth_frame_size, rt->interface );
+
+  /* Find the gateway mac */
+  struct sr_arpentry * entry = sr_arpcache_lookup(&sr->cache, rt->gw.s_addr);
+  if (!entry && ethertype != ethertype_arp) { /* We don't need des mac for an arp req */
+    fprintf(stderr, "No ARP cache entry for ");
+    print_addr_ip_int(rt->gw.s_addr);
+    /* We need to send out an ARP request to find the right MAC to send to,
+       so we put this request in the ARP cache queue. Only thing left to do is
+       setting this packets dhost when it becomes available.
+    */
+    struct sr_arpreq * arp_req = sr_arpcache_queuereq(&sr->cache, rt->gw.s_addr, data, data_size, rt->interface);
+    /* Send off the ARP req. */
+    send_or_resend_arp_req(sr, arp_req);
+
+    return;
+  }
+
+
+
+  if (ethertype == ethertype_arp) {
+    /* Broadcast */
+   eth_hdr_borrowed->ether_dhost[0] = 255; 
+   eth_hdr_borrowed->ether_dhost[1] = 255; 
+   eth_hdr_borrowed->ether_dhost[2] = 255; 
+   eth_hdr_borrowed->ether_dhost[3] = 255; 
+   eth_hdr_borrowed->ether_dhost[4] = 255; 
+   eth_hdr_borrowed->ether_dhost[5] = 255; 
+  } else {
+    memcpy(eth_hdr_borrowed->ether_dhost, entry->mac, ETHER_ADDR_LEN);
+  }
+
+  fprintf(stderr, "*******************\n");
+  fprintf(stderr, "SENDING ETHERNET PACKET:\n");
+  print_hdr_eth(buffer);
+  if (ethertype == ethertype_arp) {
+    print_hdr_arp(buffer + sizeof(sr_ethernet_hdr_t));
+  } else if (ethertype == ethertype_ip) {
+    print_hdr_ip(buffer + sizeof(sr_ethernet_hdr_t));
+  }
+  fprintf(stderr, "*******************\n");
+
+  sr_send_packet(sr, buffer, eth_frame_size, interface );
   free(buffer);
 }
 
@@ -186,7 +288,8 @@ void send_icmp(
   struct sr_instance * sr,
   sr_ip_hdr_t * ip_hdr,
   uint8_t icmp_type,
-  uint8_t icmp_code) {
+  uint8_t icmp_code,
+  struct sr_if * iface) {
 
   int len = sizeof(sr_icmp_hdr_t) + sizeof(sr_ip_hdr_t) + 8;  
   uint8_t* buffer = (uint8_t*) malloc( len );
@@ -201,28 +304,31 @@ void send_icmp(
 
   memcpy(buffer + sizeof(sr_icmp_hdr_t), ip_hdr, sizeof(sr_ip_hdr_t) + 8);
 
-  uint8_t * dest_addr = ip_hdr->sip;
-
-  send_ethernet_frame(sr, buffer, len, dest_addr  interface, ethertype_ip);
+  uint32_t dest_addr = ip_hdr->ip_src;
+  send_ethernet_frame(sr, buffer, len, dest_addr, iface->name, ethertype_ip);
   free(buffer);
 }
 
 /* Per the RFC, "the internet header plus the first 8 bytes of the original datagram's data is returned to the sender."*/
-void send_icmp_ttl(struct sr_instance * sr, sr_ip_hdr_t * ip_hdr) {
+void send_icmp_ttl(struct sr_instance * sr, sr_ip_hdr_t * ip_hdr, struct sr_if * iface) {
   /* Reference for codes: https://en.wikipedia.org/wiki/Internet_Control_Message_Protocol#Control_messages */
-  send_icmp(sr, ip_hdr, 11, 0);
+  send_icmp(sr, ip_hdr, 11, 0, iface);
 }
 
 /* Handles IP requests. */
-void handle_ip(struct sr_instance * sr, uint8_t * eth_packet) {
-  /* Parse the ethernet header */
-  /*sr_ethernet_hdr_t * eth_header = (sr_ethernet_hdr_t *) eth_packet;*/
+void handle_ip(struct sr_instance * sr, uint8_t * eth_packet, struct sr_if * iface, unsigned int len) {
+  /* Print the headers */
+  print_hdr_eth(eth_packet);
+  print_hdr_ip(eth_packet + sizeof(sr_ethernet_hdr_t));
+  
+
   sr_ip_hdr_t * ip_hdr = (sr_ip_hdr_t *) (eth_packet + sizeof(sr_ethernet_hdr_t));
 
   /* According to Wikipedia, "IHL field contains the size of the IPv4 header,
   it has 4 bits that specify the number of 32-bit words in the header."; so 
   we multiply this value by 4 to get total size in bytes */
   unsigned int ip_hl = ip_hdr->ip_hl;
+
 
   /* Verify the checksum */
   sr_ip_hdr_t * buf = (sr_ip_hdr_t *) malloc(sizeof(uint32_t) * ip_hl);
@@ -241,13 +347,14 @@ void handle_ip(struct sr_instance * sr, uint8_t * eth_packet) {
   const uint32_t dst_ip = htonl(ip_hdr->ip_dst);
 
   /* Check whether this packet is for one of my interfaces. */
-  struct sr_if * iface = sr->if_list;
-  while (iface && htonl(iface->ip) != dst_ip) {
-    iface = iface->next;
+  struct sr_if * _iface = sr->if_list;
+  while (_iface && htonl(iface->ip) != dst_ip) {
+    _iface = _iface->next;
   }
 
-  if (iface) {
+  if (_iface) {
     /* This is for me. */  
+    fprintf(stderr, "This is for one of my interfaces.\n");
     return;
   }
 
@@ -303,10 +410,34 @@ void handle_ip(struct sr_instance * sr, uint8_t * eth_packet) {
 void handle_arp(
   struct sr_instance * sr,
   struct sr_if * iface,
-  uint8_t * packet) {
-  /* Parse the ethernet header */
-  sr_ethernet_hdr_t * eth_header = (sr_ethernet_hdr_t *) packet;
+  uint8_t * packet,
+  unsigned int len) {
+
+  print_hdr_eth(packet); 
   sr_arp_hdr_t * arp_header = (sr_arp_hdr_t *)(packet + ETHERNET_HEADER_SIZE);  
+
+  /* Insert this new mapping into ARP cache */
+  struct sr_arpreq * waiting  = sr_arpcache_insert(&sr->cache, arp_header->ar_sha, arp_header->ar_sip);
+  /* Any packets were waiting for this mapping? */
+  if (waiting) {
+    /* TODO(neeilan: Send these packets out */  
+    struct sr_packet * packet = waiting->packets;
+
+    while (packet) {
+      /* ethertype_arp never waits for another ARP, so we know type is ethertype_ip here */
+      uint32_t ip = ((sr_ip_hdr_t*) (packet->buf))->ip_dst;
+      send_ethernet_frame(sr, packet->buf, packet->len, ip, packet->iface, ethertype_ip  );
+      free(packet->buf);
+      packet = packet->next;
+    }
+  }
+
+  if (arp_header->ar_op == ntohs(arp_op_reply)) {
+    fprintf(stderr, "Received ARP reply\n");
+    print_hdr_arp((uint8_t*)arp_header);
+    return;
+  }
+
 
   uint32_t arp_tip = arp_header->ar_tip;
   struct sr_if *  curr_iface = sr->if_list;
@@ -331,15 +462,11 @@ void handle_arp(
      * | ETHERNET HDR | ARP HDR | 
      *  ========================
      */
-    const int packet_len = sizeof(sr_ethernet_hdr_t) + sizeof(sr_arp_hdr_t);
-    uint8_t * reply_buff = (uint8_t*) malloc(packet_len);
-
-
     send_ethernet_frame(
       sr,
-      &reply,
+      (uint8_t*) &reply,
       sizeof(reply),
-      eth_header->ether_shost,
+      arp_header->ar_sip,
       iface->name,
       ethertype_arp);
 
@@ -388,10 +515,13 @@ void sr_handlepacket(struct sr_instance* sr,
   assert(packet);
   assert(interface);
 
+  fprintf(stderr, "Received request of len %d\n", len);
+
   if (len < sizeof(sr_ethernet_hdr_t)) {
     /* Packet too small - drop */
     return;
   }
+
 
 
   struct sr_if * iface = sr_get_interface(sr, interface);
@@ -399,13 +529,15 @@ void sr_handlepacket(struct sr_instance* sr,
   switch (ethertype(packet)) {
     /* If the packet is too small to be ARP / IP, just drop it. */
     case ethertype_arp: {
+      fprintf(stderr, "Received ARP req\n");
       if (len < sizeof(sr_ethernet_hdr_t) + sizeof(sr_arp_hdr_t)) return;
-      handle_arp(sr, iface, packet);
+      handle_arp(sr, iface, packet, len);
       return;
     }
     case ethertype_ip: {
+      fprintf(stderr, "Received IP req\n");
       if (len < sizeof(sr_ethernet_hdr_t) + sizeof(sr_ip_hdr_t)) return;
-      handle_ip(sr, packet);
+      handle_ip(sr, packet, iface, len);
       return;
     }
     default: {

@@ -57,6 +57,9 @@ void sr_init(struct sr_instance* sr)
 
 } /* -- sr_init -- */
 
+/*
+
+*/
 void handle_arp_request(
   struct sr_instance * sr,
   struct sr_if * iface,
@@ -86,17 +89,14 @@ void handle_arp_request(
   memcpy(&reply.ar_sha, iface->addr, MAC_ADDR_SIZE);
   memcpy(&reply.ar_tha, hdr->ar_sha, MAC_ADDR_SIZE);
 
-
   /* Ethernet frame */
-  size_t eth_frame_size = sizeof(sr_ethernet_hdr_t) + sizeof(sr_arp_hdr_t);
-  uint8_t * buffer = malloc(eth_frame_size);
-  sr_ethernet_hdr_t * eth_hdr_borrowed = (sr_ethernet_hdr_t*) buffer;
-  memcpy(eth_hdr_borrowed->ether_dhost, hdr->ar_sha, ETHER_ADDR_LEN);
-  memcpy(eth_hdr_borrowed->ether_shost, iface->addr, ETHER_ADDR_LEN);
-  eth_hdr_borrowed->ether_type = htons(ethertype_arp);
-
-  sr_send_packet(sr, buffer, eth_frame_size, iface->name);
-  
+  send_ethernet_frame(
+    sr,
+    (uint8_t*) &reply,
+    sizeof(reply),
+    reply.ar_tip,
+    iface->name,
+    ethertype_arp);
 }
 
 void handle_arp_reply(sr_arp_hdr_t * hdr) {
@@ -151,43 +151,66 @@ void send_ip_datagram(
     struct sr_rt * rt,
     sr_ip_hdr_t * data,
     size_t data_size) {
+  send_ethernet_frame(sr, data, data_size, rt->dest.s_addr, rt->interface, ethertype_ip);
+}
+
+/*
+Sends a black-box packet (data) of size data_size bytes as an ethernet
+frame to rt link.
+*/
+void send_ethernet_frame(
+  struct sr_instance * sr,
+  uint8_t * data,
+  size_t data_size,
+  uiint8_t * dest_addr.
+  const char * interface,
+  uint8_t ethertype) {
+
   size_t eth_frame_size = sizeof(sr_ethernet_hdr_t) + data_size;
   uint8_t * buffer = malloc(eth_frame_size);
 
-
-  struct sr_if * iface = sr_get_interface(sr, rt->interface);
+  struct sr_if * iface = sr_get_interface(sr, interface);
   if (!iface) { return; }
 
   sr_ethernet_hdr_t * eth_hdr_borrowed = (sr_ethernet_hdr_t*) buffer;
-  memcpy(eth_hdr_borrowed->ether_dhost, &rt->dest.s_addr, ETHER_ADDR_LEN);
+  memcpy(eth_hdr_borrowed->ether_dhost, dest_addr, ETHER_ADDR_LEN);
   memcpy(eth_hdr_borrowed->ether_shost, iface->addr, ETHER_ADDR_LEN);
-  eth_hdr_borrowed->ether_type = htons(ethertype_ip);
+  eth_hdr_borrowed->ether_type = htons(ethertype);
 
-  assert( ethertype((uint8_t*)eth_hdr_borrowed) == ethertype_ip );
-  
   memcpy(eth_hdr_borrowed + 1, data, data_size);
-
-
-  print_hdr_ip((uint8_t *) data);
-  print_hdr_eth(buffer);
-
   sr_send_packet(sr, buffer, eth_frame_size, rt->interface );
   free(buffer);
 }
 
+void send_icmp(
+  struct sr_instance * sr,
+  sr_ip_hdr_t * ip_hdr,
+  uint8_t icmp_type,
+  uint8_t icmp_code) {
 
-/* Per the RFC, "the internet header plus the first 8 bytes of the original datagram's data is returned to the sender."*/
-void send_icmpi_ttl(struct sr_instance * sr, sr_ip_hdr_t * ip_hdr) {
   int len = sizeof(sr_icmp_hdr_t) + sizeof(sr_ip_hdr_t) + 8;  
   uint8_t* buffer = (uint8_t*) malloc( len );
 
-  /* Reference for codes: https://en.wikipedia.org/wiki/Internet_Control_Message_Protocol#Control_messages */
   sr_icmp_hdr_t * icmp_hdr_borrowed = (sr_icmp_hdr_t *) buffer;
-  icmp_hdr_borrowed->icmp_type = 11; /* Code for ttl */
-  icmp_hdr_borrowed->icmp_code = 0;
+  icmp_hdr_borrowed->icmp_type = icmp_type;
+  icmp_hdr_borrowed->icmp_code = icmp_code;
+
   /* Calculate checksum */
   icmp_hdr_borrowed->icmp_sum = 0;
   icmp_hdr_borrowed->icmp_sum = cksum( icmp_hdr_borrowed, sizeof(sr_icmp_hdr_t) );
+
+  memcpy(buffer + sizeof(sr_icmp_hdr_t), ip_hdr, sizeof(sr_ip_hdr_t) + 8);
+
+  uint8_t * dest_addr = ip_hdr->sip;
+
+  send_ethernet_frame(sr, buffer, len, dest_addr  interface, ethertype_ip);
+  free(buffer);
+}
+
+/* Per the RFC, "the internet header plus the first 8 bytes of the original datagram's data is returned to the sender."*/
+void send_icmp_ttl(struct sr_instance * sr, sr_ip_hdr_t * ip_hdr) {
+  /* Reference for codes: https://en.wikipedia.org/wiki/Internet_Control_Message_Protocol#Control_messages */
+  send_icmp(sr, ip_hdr, 11, 0);
 }
 
 /* Handles IP requests. */
@@ -260,6 +283,7 @@ void handle_ip(struct sr_instance * sr, uint8_t * eth_packet) {
       ip_packet_len - sizeof(sr_ip_hdr_t));
 
     /* Send it! */
+
     send_ip_datagram(sr, match, (sr_ip_hdr_t *) buffer, ip_packet_len); 
 
     free(buffer);
@@ -272,7 +296,9 @@ void handle_ip(struct sr_instance * sr, uint8_t * eth_packet) {
 
 
 /*---------------------------------------------------------------------
-  Handles ARP (requests and replies)
+  Handles ARP (requests and replies). In turn, it uses
+  handle_arp_request and handle_arp_reply to do its work.
+  uint8_t * packet is pointer to start of the ethernet packet.
 ---------------------------------------------------------------------*/
 void handle_arp(
   struct sr_instance * sr,
@@ -309,17 +335,14 @@ void handle_arp(
     uint8_t * reply_buff = (uint8_t*) malloc(packet_len);
 
 
-    sr_ethernet_hdr_t reply_eth_hdr;
-    memcpy(&reply_eth_hdr.ether_dhost, eth_header->ether_shost, ETHER_ADDR_LEN);
-    memcpy(&reply_eth_hdr.ether_shost, iface->addr, ETHER_ADDR_LEN);
-    reply_eth_hdr.ether_type = htons(ethertype_arp);
-    
-    memcpy(reply_buff, &reply_eth_hdr, sizeof(sr_ethernet_hdr_t));
-    memcpy(reply_buff + sizeof(sr_ethernet_hdr_t), &reply, sizeof(sr_arp_hdr_t));
+    send_ethernet_frame(
+      sr,
+      &reply,
+      sizeof(reply),
+      eth_header->ether_shost,
+      iface->name,
+      ethertype_arp);
 
-    sr_send_packet(sr, reply_buff, packet_len, iface->name); 
-
-    free(reply_buff);
     return;
     
   } else {
@@ -374,6 +397,7 @@ void sr_handlepacket(struct sr_instance* sr,
   struct sr_if * iface = sr_get_interface(sr, interface);
 
   switch (ethertype(packet)) {
+    /* If the packet is too small to be ARP / IP, just drop it. */
     case ethertype_arp: {
       if (len < sizeof(sr_ethernet_hdr_t) + sizeof(sr_arp_hdr_t)) return;
       handle_arp(sr, iface, packet);

@@ -112,6 +112,18 @@ void handle_arp_request(
   reply.ar_tip = hdr->ar_sip; /* Back to source */
   memcpy(&reply.ar_sha, iface->addr, MAC_ADDR_SIZE);
   memcpy(&reply.ar_tha, hdr->ar_sha, MAC_ADDR_SIZE);
+
+
+  /* Ethernet frame */
+  size_t eth_frame_size = sizeof(sr_ethernet_hdr_t) + sizeof(sr_arp_hdr_t);
+  uint8_t * buffer = malloc(eth_frame_size);
+  sr_ethernet_hdr_t * eth_hdr_borrowed = (sr_ethernet_hdr_t*) buffer;
+  memcpy(eth_hdr_borrowed->ether_dhost, hdr->ar_sha, ETHER_ADDR_LEN);
+  memcpy(eth_hdr_borrowed->ether_shost, iface->addr, ETHER_ADDR_LEN);
+  eth_hdr_borrowed->ether_type = htons(ethertype_arp);
+
+  sr_send_packet(sr, buffer, eth_frame_size, iface->name);
+  
 }
 
 void handle_arp_reply(sr_arp_hdr_t * hdr) {
@@ -310,10 +322,6 @@ void handle_ip(struct sr_instance * sr, uint8_t * eth_packet) {
     fprintf(stderr, "Sending IP frame to ip: "); print_addr_ip_int(hdr_borrowed->ip_dst);
     fprintf(stderr, " from ip: "); print_addr_ip_int(hdr_borrowed->ip_src);
 
-    ((sr_ip_hdr_t *) buffer)->ip_src = htonl( ((sr_ip_hdr_t *) buffer)->ip_src );
-    ((sr_ip_hdr_t *) buffer)->ip_dst = htonl( ((sr_ip_hdr_t *) buffer)->ip_dst );
-    
-
     fprintf(stderr,"Final packet len %d\n", ip_packet_len);
     send_ip_datagram(sr, match, (sr_ip_hdr_t *) buffer, ip_packet_len); 
 
@@ -333,9 +341,9 @@ void handle_arp(
   /* Parse the ethernet header */
   sr_ethernet_hdr_t * eth_header = (sr_ethernet_hdr_t *) packet;
 
-  printf("DEST MAC: ");      print_addr_eth( (uint8_t*) eth_header->ether_dhost );
-  printf("\nSRC MAC: "); print_addr_eth(  (uint8_t*) eth_header->ether_shost );
-  printf("\n");
+  fprintf(stderr, "DEST MAC: ");      print_addr_eth( (uint8_t*) eth_header->ether_dhost );
+  fprintf(stderr, "\nSRC MAC: "); print_addr_eth(  (uint8_t*) eth_header->ether_shost );
+  fprintf(stderr, "\n");
 
   sr_arp_hdr_t * arp_header = (sr_arp_hdr_t *)(packet + ETHERNET_HEADER_SIZE);  
 
@@ -416,6 +424,7 @@ void sr_handlepacket(struct sr_instance* sr,
   }
 
 
+  fprintf(stderr, "\n*****************************\n");
   print_hdr_eth(packet);
 
   struct sr_if * iface = sr_get_interface(sr, interface);

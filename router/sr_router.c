@@ -57,43 +57,16 @@ void sr_init(struct sr_instance* sr)
 
 } /* -- sr_init -- */
 
-/*---------------------------------------------------------------------
- * Method: sr_handlepacket(uint8_t* p,char* interface)
- * Scope:  Global
- *
- * This method is called each time the router receives a packet on the
- * interface.  The packet buffer, the packet length and the receiving
- * interface are passed in as parameters. The packet is complete with
- * ethernet headers.
- *
- * Note: Both the packet buffer and the character's memory are handled
- * by sr_vns_comm.c that means do NOT delete either.  Make a copy of the
- * packet instead if you intend to keep it around beyond the scope of
- * the method call.
- *
- *---------------------------------------------------------------------*/
 void handle_arp_request(
   struct sr_instance * sr,
   struct sr_if * iface,
   sr_arp_hdr_t * hdr) {
 
-  
-  printf("\nARP REQ sender sha is "); print_addr_eth( hdr->ar_sha );
-  printf(" and tha is "); print_addr_eth( hdr->ar_tha );
-  printf("\n");
-
   uint32_t target_ip = hdr->ar_tip;
-  uint32_t sender_ip = hdr->ar_sip;
-
-  printf("ARP REQ sender ip is "); print_addr_ip_int(sender_ip); printf("\n");
-
   struct sr_arpentry * entry = sr_arpcache_lookup( &sr->cache, target_ip );
 
   if (entry == NULL) {
-    /* No ARP entry */
-    printf("No ARP entry for IP: ");
-    print_addr_ip_int(target_ip);
-    printf("\n");
+    /* No ARP entry - drop */
     return;
   }
 
@@ -143,17 +116,14 @@ struct sr_rt * match_longest_prefix(struct sr_instance * sr, uint32_t ip_addr) {
   ip_addr = ntohl(ip_addr);
 
   struct sr_rt * rt = sr->routing_table;
-  fprintf(stderr, "Trying to find a match for : "); print_addr_ip_int(ip_addr);
   while (rt) {
     int curr_prefix = 0;
     uint32_t prefix = 1 << 31;
     uint32_t mask = 0;    
 
-    fprintf(stderr, "Inspecting : "); print_addr_ip_int(rt->dest.s_addr);
 
     /* Exact match baby! */
     if (ip_addr == ntohl(rt->dest.s_addr)) { 
-      fprintf(stderr, "EXACT MATCH ON : "); print_addr_ip_int(rt->dest.s_addr);
       return rt;
     }
 
@@ -172,22 +142,9 @@ struct sr_rt * match_longest_prefix(struct sr_instance * sr, uint32_t ip_addr) {
     rt = rt->next;
   }
 
-  if (longest_match) {
-    fprintf(stderr, "Match we found was "); print_addr_ip_int(longest_match->dest.s_addr);
-  }
   return longest_match; 
 }
 
-/*
-void htonl_mac(uint8_t * addr) {
-  int i;
-  for (i = 0; i < 3; i++) {
-    uint8_t tmp = addr[i];
-    addr[i] = addr[5-i];
-    addr[5-i] = tmp;
-  }
-}
-*/
 
 void send_ip_datagram(
     struct sr_instance * sr,
@@ -201,8 +158,6 @@ void send_ip_datagram(
   struct sr_if * iface = sr_get_interface(sr, rt->interface);
   if (!iface) { return; }
 
-  fprintf(stderr, "Sending to Iface::::: %s\n", iface->name);
-
   sr_ethernet_hdr_t * eth_hdr_borrowed = (sr_ethernet_hdr_t*) buffer;
   memcpy(eth_hdr_borrowed->ether_dhost, &rt->dest.s_addr, ETHER_ADDR_LEN);
   memcpy(eth_hdr_borrowed->ether_shost, iface->addr, ETHER_ADDR_LEN);
@@ -212,33 +167,34 @@ void send_ip_datagram(
   
   memcpy(eth_hdr_borrowed + 1, data, data_size);
 
-  fprintf(stderr, "Eth frame dhost: "); print_addr_eth(eth_hdr_borrowed->ether_dhost);
-  fprintf(stderr, "Eth frame shost: "); print_addr_eth(eth_hdr_borrowed->ether_shost);
-
 
   print_hdr_ip((uint8_t *) data);
   print_hdr_eth(buffer);
 
-  int result = sr_send_packet(sr, buffer, eth_frame_size, rt->interface );
-  fprintf(stderr, "Ethernet send result: %d\n", result);
+  sr_send_packet(sr, buffer, eth_frame_size, rt->interface );
   free(buffer);
 }
 
 
+/* Per the RFC, "the internet header plus the first 8 bytes of the original datagram's data is returned to the sender."*/
+void send_icmpi_ttl(struct sr_instance * sr, sr_ip_hdr_t * ip_hdr) {
+  int len = sizeof(sr_icmp_hdr_t) + sizeof(sr_ip_hdr_t) + 8;  
+  uint8_t* buffer = (uint8_t*) malloc( len );
+
+  /* Reference for codes: https://en.wikipedia.org/wiki/Internet_Control_Message_Protocol#Control_messages */
+  sr_icmp_hdr_t * icmp_hdr_borrowed = (sr_icmp_hdr_t *) buffer;
+  icmp_hdr_borrowed->icmp_type = 11; /* Code for ttl */
+  icmp_hdr_borrowed->icmp_code = 0;
+  /* Calculate checksum */
+  icmp_hdr_borrowed->icmp_sum = 0;
+  icmp_hdr_borrowed->icmp_sum = cksum( icmp_hdr_borrowed, sizeof(sr_icmp_hdr_t) );
+}
+
+/* Handles IP requests. */
 void handle_ip(struct sr_instance * sr, uint8_t * eth_packet) {
-  printf("HANDLING IP\n");
-
   /* Parse the ethernet header */
-  sr_ethernet_hdr_t * eth_header = (sr_ethernet_hdr_t *) eth_packet;  
+  /*sr_ethernet_hdr_t * eth_header = (sr_ethernet_hdr_t *) eth_packet;*/
   sr_ip_hdr_t * ip_hdr = (sr_ip_hdr_t *) (eth_packet + sizeof(sr_ethernet_hdr_t));
-
-  /******/
-  fprintf(stderr, "Received IP req from addr: ");
-  print_addr_ip_int(htonl(ip_hdr->ip_src));
-  fprintf(stderr, " to addr: ");
-  print_addr_ip_int(htonl(ip_hdr->ip_dst));
-  fprintf(stderr, "\n");
-  /******/
 
   /* According to Wikipedia, "IHL field contains the size of the IPv4 header,
   it has 4 bits that specify the number of 32-bit words in the header."; so 
@@ -268,12 +224,9 @@ void handle_ip(struct sr_instance * sr, uint8_t * eth_packet) {
   }
 
   if (iface) {
-    printf("THIS IS FOR MEEEEEEE!!!\n");
-    /* TODO: Finish this. */  
+    /* This is for me. */  
     return;
   }
-
-  printf("THIS IS NOOOOOOOT FOR MEEEEEEE!!!\n");
 
   uint8_t next_ttl;
   if ((next_ttl = ip_hdr->ip_ttl - 1) == 0) {
@@ -292,59 +245,41 @@ void handle_ip(struct sr_instance * sr, uint8_t * eth_packet) {
   res_ip_hdr->ip_sum = 0;
   res_ip_hdr->ip_sum = cksum((const void *) res_ip_hdr, ip_hl * 4);
   
- /* res_ip_hdr->ip_sum = cksum((const void *) res_ip_hdr, sizeof(sr_ip_hdr_t));
-  */
-
   /* Find the appropriate router (if any) to forward to. */
   struct sr_rt * match = match_longest_prefix(sr, ip_hdr->ip_dst); 
   if (match) {
-    printf("MATCH FOUND!!!!\n");
     int ip_packet_len = ntohs(ip_hdr->ip_len) ;
     
-    fprintf(stderr, "Going to send packet of len %d to %s", ip_packet_len, match->interface );
     uint8_t * buffer = (uint8_t*) malloc( sizeof(uint8_t) * ip_packet_len ); 
     /* Copy the header */
     memcpy(buffer, res_ip_hdr, ip_hl * 4);
 
     /* Copy the data */
-    /*
-    memcpy(((uint8_t *)buffer) + (ip_hl * 4),
-      ((uint8_t*)ip_hdr) + (ip_hl * 4),
-      ip_packet_len - (ip_hl * 4));
-    */    
     memcpy(((uint8_t *)buffer) + sizeof(sr_ip_hdr_t),
       ((uint8_t*)ip_hdr) + sizeof(sr_ip_hdr_t),
       ip_packet_len - sizeof(sr_ip_hdr_t));
 
     /* Send it! */
-    sr_ip_hdr_t * hdr_borrowed = (sr_ip_hdr_t*) buffer;
-    
-    fprintf(stderr, "Sending IP frame to ip: "); print_addr_ip_int(hdr_borrowed->ip_dst);
-    fprintf(stderr, " from ip: "); print_addr_ip_int(hdr_borrowed->ip_src);
-
-    fprintf(stderr,"Final packet len %d\n", ip_packet_len);
     send_ip_datagram(sr, match, (sr_ip_hdr_t *) buffer, ip_packet_len); 
 
     free(buffer);
   } else {
-    printf("NOOOOOO MATCH FOUND!!!!\n");
+    /* No match found */
   }
 
   free(res_ip_hdr);
 }
 
+
+/*---------------------------------------------------------------------
+  Handles ARP (requests and replies)
+---------------------------------------------------------------------*/
 void handle_arp(
   struct sr_instance * sr,
   struct sr_if * iface,
   uint8_t * packet) {
-  printf("HANDLING ARP\n");
   /* Parse the ethernet header */
   sr_ethernet_hdr_t * eth_header = (sr_ethernet_hdr_t *) packet;
-
-  fprintf(stderr, "DEST MAC: ");      print_addr_eth( (uint8_t*) eth_header->ether_dhost );
-  fprintf(stderr, "\nSRC MAC: "); print_addr_eth(  (uint8_t*) eth_header->ether_shost );
-  fprintf(stderr, "\n");
-
   sr_arp_hdr_t * arp_header = (sr_arp_hdr_t *)(packet + ETHERNET_HEADER_SIZE);  
 
   uint32_t arp_tip = arp_header->ar_tip;
@@ -357,7 +292,6 @@ void handle_arp(
   if (curr_iface) {
     /* If so, send the receiving interface MAC back, because that's where
        the sender should send future requests to target IP to. */
-    printf("ARP req is for one of my interfaces!\n");
 
     sr_arp_hdr_t reply;
     memcpy(&reply, arp_header, sizeof(reply));
@@ -383,8 +317,7 @@ void handle_arp(
     memcpy(reply_buff, &reply_eth_hdr, sizeof(sr_ethernet_hdr_t));
     memcpy(reply_buff + sizeof(sr_ethernet_hdr_t), &reply, sizeof(sr_arp_hdr_t));
 
-    int arp_send_result = sr_send_packet(sr, reply_buff, packet_len, iface->name); 
-    fprintf(stderr, "ARP reply send result: %d\n", arp_send_result);
+    sr_send_packet(sr, reply_buff, packet_len, iface->name); 
 
     free(reply_buff);
     return;
@@ -397,7 +330,6 @@ void handle_arp(
 
   uint16_t ar_op = ntohs(arp_header->ar_op);
   if (ar_op == arp_op_request) {
-    printf("ARP REQUEST\n");
     handle_arp_request(sr, iface, arp_header);
   } else if (ar_op == arp_op_reply) {
     printf("ARP REPLY\n");
@@ -408,6 +340,21 @@ void handle_arp(
 }
 
 
+/*---------------------------------------------------------------------
+ * Method: sr_handlepacket(uint8_t* p,char* interface)
+ * Scope:  Global
+ *
+ * This method is called each time the router receives a packet on the
+ * interface.  The packet buffer, the packet length and the receiving
+ * interface are passed in as parameters. The packet is complete with
+ * ethernet headers.
+ *
+ * Note: Both the packet buffer and the character's memory are handled
+ * by sr_vns_comm.c that means do NOT delete either.  Make a copy of the
+ * packet instead if you intend to keep it around beyond the scope of
+ * the method call.
+ *
+ *---------------------------------------------------------------------*/
 void sr_handlepacket(struct sr_instance* sr,
         uint8_t * packet/* lent */,
         unsigned int len,
@@ -424,29 +371,7 @@ void sr_handlepacket(struct sr_instance* sr,
   }
 
 
-  fprintf(stderr, "\n*****************************\n");
-  print_hdr_eth(packet);
-
   struct sr_if * iface = sr_get_interface(sr, interface);
-
-  printf("\n\n*** -> Received packet of length %d ",len);
-  printf("on iface %s (", interface); print_addr_eth((uint8_t*)iface->addr); printf(")\n");
-  
-
-  /*
-
-  uint16_t cksum(const void *_data, int len);
-
-  uint16_t ethertype(uint8_t *buf);
-  uint8_t ip_protocol(uint8_t *buf);
-
-  void print_addr_eth(uint8_t *addr);
-  void print_addr_ip(struct in_addr address);
-  void print_addr_ip_int(uint32_t ip);
-
-  void print_hdr_eth(uint8_t *buf);
-
-  */
 
   switch (ethertype(packet)) {
     case ethertype_arp: {
